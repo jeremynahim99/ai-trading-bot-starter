@@ -1,0 +1,76 @@
+//@version=6
+// BOT BUILDER - TradingView strategy template (Artillery Trades)
+// Textbook EMA trend-pullback example for learning. Not financial advice.
+// Alerts: create the alert with "Order fills only" and message {{strategy.order.alert_message}}.
+// Edit the inputs, or paste your Bot Spec into Claude/ChatGPT and ask it to rewrite the ENTRY RULES section.
+strategy("Bot Builder Template - EMA Pullback", overlay = true,
+     initial_capital = 50000, default_qty_type = strategy.fixed, default_qty_value = 1,  // order size is set by the "Contracts per trade" input below
+     commission_type = strategy.commission.cash_per_contract, commission_value = 2.5,
+     slippage = 2, process_orders_on_close = true, max_bars_back = 500)
+
+// ---------- INPUTS ----------
+grpS = "Signal"
+fastLen  = input.int(20, "Fast EMA", group = grpS)
+slowLen  = input.int(50, "Slow EMA", group = grpS)
+grpR = "Risk"
+atrLen   = input.int(14, "ATR length", group = grpR)
+stopATR  = input.float(1.0, "Stop = ATR x", step = 0.1, group = grpR)
+targetR  = input.float(2.0, "Target (R)", step = 0.25, group = grpR)
+maxTrades = input.int(2, "Max trades per day", group = grpR)
+dailyStopR = input.float(2.0, "Daily stop (R lost)", step = 0.5, group = grpR, tooltip = "No new trades once the day is down this many R")
+grpT = "Time"
+tz       = input.string("America/New_York", "Time zone for the windows", group = grpT)
+sess     = input.session("0945-1530", "Entry window", group = grpT)
+flatSess = input.session("1555-1600", "Flatten window", group = grpT)
+grpA = "Alerts / webhook"
+ticker   = input.string("MNQ1!", "Ticker sent in alerts", group = grpA)
+qty      = input.int(1, "Contracts per trade", minval = 1, group = grpA)
+
+// ---------- INDICATORS ----------
+fast = ta.ema(close, fastLen)
+slow = ta.ema(close, slowLen)
+atr  = ta.atr(atrLen)
+plot(fast, "Fast EMA", color.new(color.teal, 0), 2)
+plot(slow, "Slow EMA", color.new(color.orange, 0), 2)
+
+// ---------- DAY TRACKING (trades + daily stop in R) ----------
+var int   tradesToday = 0
+var float dayStartEq  = na
+var float lastRisk    = na
+newDay = ta.change(time("D")) != 0
+if newDay
+    tradesToday := 0
+    dayStartEq  := strategy.equity
+riskCash = nz(lastRisk, atr * stopATR) * syminfo.pointvalue * qty
+dayLocked = riskCash > 0 and (strategy.equity - nz(dayStartEq, strategy.equity)) <= -dailyStopR * riskCash
+
+inWindow = not na(time(timeframe.period, sess, tz))
+flatNow  = not na(time(timeframe.period, flatSess, tz))
+
+// ---------- ENTRY RULES (edit these) ----------
+longSig  = fast > slow and low <= fast and close > fast
+shortSig = fast < slow and high >= fast and close < fast
+
+canTrade = inWindow and strategy.position_size == 0 and tradesToday < maxTrades and not dayLocked and atr > 0
+risk = atr * stopATR
+longSL  = math.round_to_mintick(close - risk)
+longTP  = math.round_to_mintick(close + targetR * risk)
+shortSL = math.round_to_mintick(close + risk)
+shortTP = math.round_to_mintick(close - targetR * risk)
+
+if canTrade and longSig
+    lastRisk := risk
+    strategy.entry("Long", strategy.long, qty = qty, alert_message = '{"ticker":"' + ticker + '","action":"buy","quantity":' + str.tostring(qty) + ',"stopLoss":' + str.tostring(longSL) + ',"takeProfit":' + str.tostring(longTP) + '}')
+    strategy.exit("Long exit", "Long", stop = longSL, limit = longTP, alert_message = '{"ticker":"' + ticker + '","action":"exit"}')
+    tradesToday += 1
+else if canTrade and shortSig
+    lastRisk := risk
+    strategy.entry("Short", strategy.short, qty = qty, alert_message = '{"ticker":"' + ticker + '","action":"sell","quantity":' + str.tostring(qty) + ',"stopLoss":' + str.tostring(shortSL) + ',"takeProfit":' + str.tostring(shortTP) + '}')
+    strategy.exit("Short exit", "Short", stop = shortSL, limit = shortTP, alert_message = '{"ticker":"' + ticker + '","action":"exit"}')
+    tradesToday += 1
+
+// ---------- FLAT BEFORE THE CLOSE ----------
+if flatNow and strategy.position_size != 0
+    strategy.close_all(comment = "EOD flat", alert_message = '{"ticker":"' + ticker + '","action":"exit"}')
+
+bgcolor(dayLocked ? color.new(color.red, 90) : na, title = "Daily stop hit")
